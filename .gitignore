@@ -1,0 +1,20 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+.env
+.env.*
+!.env.example
+data/
+artifacts/
+*.log
+
+# 本地 IDE、学习记录和仓库维护说明不进入公开项目
+.vscode/
+docs/
+AGENTS.md
+
