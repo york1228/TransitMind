@@ -14,7 +14,7 @@ import psycopg
 from psycopg import sql
 
 from .gtfs_inventory import DEFAULT_SOURCE
-from .postgres_check import DatabaseCheckError, DatabaseSettings, EXPECTED_DATABASE, EXPECTED_QUERY_USER, load_database_settings
+from .database_config import DatabaseCheckError, DatabaseSettings, EXPECTED_DATABASE, EXPECTED_QUERY_USER, load_database_settings
 
 
 @dataclass(frozen=True)

@@ -6,7 +6,8 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .neo4j_store import Neo4jSchemaStore, SchemaGraphError, load_neo4j_settings
-from .schema_memory import JsonSchemaStore, search_schema
+from .schema_memory import search_schema
+from .schema_store import JsonSchemaStore
 
 
 def graph_id(snapshot: dict[str, Any], *parts: str) -> str:
@@ -100,7 +101,7 @@ class GraphSchemaRetriever:
         return self.retrieve_from_seeds(seeds, limit)
 
     def retrieve_from_seeds(self, seeds: list[str], limit: int = 3) -> dict[str, Any]:
-        # 复用同一图查询；入口既可以由关键词找到，也可以由向量召回提供。
+        # 复用同一图查询；入口来自关键词、向量召回，或 schema_expand 接收的已知表名。
         seeds = list(dict.fromkeys(seeds))
         rows = self.store.neighborhood(graph_id(self.snapshot, "snapshot"), seeds)
         candidates = {}
@@ -156,6 +157,13 @@ def main() -> int:
             settings = load_neo4j_settings()
             records = build_graph_records(snapshot)
             Neo4jSchemaStore(settings).sync(records)
+            # 图已提交后再记录本地凭据；页面只读这份记录，不自动探测 Neo4j。
+            from .schema_status import save_graph_sync_receipt
+
+            try:
+                save_graph_sync_receipt(snapshot, settings.database)
+            except OSError:
+                print("Warning: Neo4j sync committed, but its local status receipt could not be saved.")
             print("Mode: schema_graph_sync (Neo4j metadata write; no PostgreSQL or LLM request)")
             print(f"Neo4j database: {settings.database} | Business database: {snapshot['database_id']}")
             print(f"Schema version: {snapshot['version']}")

@@ -89,7 +89,7 @@ class PostgresSchemaTests(unittest.TestCase):
                     table = "agency" if database else "trips"
                     argv = ["transitmind", "--json"] + (["--database"] if database else []) + (["--live"] if live else [])
                     with patch("transitmind.postgres_schema.psycopg.connect") as connect, \
-                         patch("transitmind.postgres_check.load_database_settings", return_value=SETTINGS) as load, \
+                         patch("transitmind.database_config.load_database_settings", return_value=SETTINGS) as load, \
                          patch("transitmind.deepseek_model.build_deepseek_model", return_value=ScriptedModel(table)) as model, \
                          patch("sys.argv", argv), redirect_stdout(output):
                         prepare_connection(connect)

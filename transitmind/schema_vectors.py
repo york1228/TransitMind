@@ -7,7 +7,7 @@ from math import sqrt
 from pathlib import Path
 from typing import Any
 
-from .schema_memory import PROJECT_ROOT, JsonSchemaStore
+from .schema_store import PROJECT_ROOT, JsonSchemaStore
 
 
 DEFAULT_MODEL = "BAAI/bge-small-zh-v1.5"

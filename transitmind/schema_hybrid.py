@@ -5,7 +5,7 @@ import json
 from typing import Any
 
 from .schema_graph import GraphSchemaRetriever
-from .schema_memory import JsonSchemaStore
+from .schema_store import JsonSchemaStore
 from .schema_vectors import VectorSchemaRetriever
 
 

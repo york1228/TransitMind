@@ -1,46 +1,29 @@
-"""Persist PostgreSQL schema snapshots and retrieve candidate tables."""
+"""Collect PostgreSQL schema snapshots and retrieve candidate tables."""
 
 import argparse
 import json
 from datetime import datetime, timezone
 from functools import partial
+from importlib.resources import files
 from pathlib import Path
 from typing import Any
 
+from .database_config import DatabaseSettings, load_database_settings
 from .models import ToolDefinition, ToolResult
-from .postgres_check import DatabaseSettings, load_database_settings
 from .postgres_schema import describe_table
-from .run_sql import ALLOWED_TABLES
+# 兼容旧导入路径；存储实现和原路径常量统一由 schema_store 提供。
+from .schema_store import DEFAULT_FILE, PROJECT_ROOT, JsonSchemaStore
+from .sql_policy import ALLOWED_TABLES
 from .tools import Tool
 
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_FILE = PROJECT_ROOT / "data" / "memory" / "schema" / "current.json"
-DEFAULT_NOTES = PROJECT_ROOT / "docs" / "examples" / "gtfs-schema-notes.json"
+# 从正式包内资源读取默认说明，安装后运行也不需要 docs 目录。
+DEFAULT_NOTES = files("transitmind").joinpath("resources", "gtfs-schema-notes.json")
 
 
-class JsonSchemaStore:
-    def __init__(self, path: Path = DEFAULT_FILE) -> None:
-        self.path = path
-
-    def load(self) -> dict[str, Any]:
-        if not self.path.exists():
-            raise ValueError("No schema snapshot. Run python -m transitmind.schema_memory sync first.")
-        return json.loads(self.path.read_text(encoding="utf-8"))
-
-    def save(self, snapshot: dict[str, Any]) -> None:
-        # 每次同步保留一个版本；current.json 只指向这次保存的最新内容。
-        versions = self.path.parent / "versions"
-        versions.mkdir(parents=True, exist_ok=True)
-        payload = json.dumps(snapshot, ensure_ascii=False, indent=2)
-        (versions / f"{snapshot['version']}.json").write_text(payload, encoding="utf-8")
-        # 先写临时文件再替换，和会话、经验记忆的保存方式一致。
-        temporary = self.path.with_suffix(".json.tmp")
-        temporary.write_text(payload, encoding="utf-8")
-        temporary.replace(self.path)
-
-
-def collect_schema(settings: DatabaseSettings, notes: dict[str, Any]) -> dict[str, Any]:
+def collect_schema(
+    settings: DatabaseSettings, notes: dict[str, Any], *, manual_annotations: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     tables = []
     missing_tables = []
     for table in sorted(ALLOWED_TABLES):
@@ -52,8 +35,11 @@ def collect_schema(settings: DatabaseSettings, notes: dict[str, Any]) -> dict[st
                 continue
             raise ValueError(f"Cannot sync {table}: {result.content}")
         metadata = json.loads(result.content)
-        annotation = notes.get(table, {})
-        column_notes = annotation.get("columns", {})
+        defaults = notes.get(table, {})
+        manual = (manual_annotations or {}).get(table, {})
+        # 人工保存的说明优先于示例配置；真实列名、类型和键仍然来自数据库。
+        annotation = {**defaults, **manual}
+        column_notes = {**defaults.get("columns", {}), **manual.get("columns", {})}
         # metadata 是数据库给的结构，annotation 是我们补充的说明。 下一段 tables.append(...)，就是把这两份内容合成一条表结构记录。
         tables.append({
             "table": metadata["table"],
@@ -79,6 +65,7 @@ def collect_schema(settings: DatabaseSettings, notes: dict[str, Any]) -> dict[st
         "synced_at": now.isoformat(),
         "tables": tables,
         "missing_tables": missing_tables,
+        "manual_annotations": manual_annotations or {},
     }
 
 
@@ -173,9 +160,12 @@ def schema_retrieve(
     )
 
 
-def build_schema_tool(database_id: str, retrieval_mode: str = "keyword") -> Tool:
+def build_schema_tool(
+    database_id: str, retrieval_mode: str = "keyword", *, snapshot: dict[str, Any] | None = None,
+) -> Tool:
     # 一次提问固定使用启动时加载的版本，中途同步不会改变这一轮的 Schema 参考。
-    snapshot = JsonSchemaStore().load()
+    if snapshot is None:
+        snapshot = JsonSchemaStore().load()
     if snapshot["database_id"] != database_id or snapshot["schema"] != "public":
         raise ValueError("The saved schema snapshot does not match the configured business database and schema.")
     vector_retriever = None
@@ -243,15 +233,26 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Sync or search the local schema memory.")
     commands = parser.add_subparsers(dest="command", required=True)
     sync = commands.add_parser("sync", help="Read database metadata and save a versioned local snapshot.")
-    sync.add_argument("--notes", type=Path, default=DEFAULT_NOTES, help="Manual table descriptions and keywords.")
+    sync.add_argument("--notes", type=Path, help="External table descriptions and keywords; defaults to packaged MBTA notes.")
     search = commands.add_parser("search", help="Search the saved snapshot without a database or LLM request.")
     search.add_argument("--query", required=True)
     args = parser.parse_args()
     store = JsonSchemaStore()
     try:
         if args.command == "sync":
-            notes = json.loads(args.notes.read_text(encoding="utf-8"))
-            snapshot = collect_schema(load_database_settings(for_query=True), notes)
+            # 显式指定 --notes 时用外部文件，否则读取包内默认值；人工覆盖仍在下方合并。
+            notes_file = args.notes if args.notes is not None else DEFAULT_NOTES
+            notes = json.loads(notes_file.read_text(encoding="utf-8"))
+            previous = store.load() if store.path.exists() else {}
+            snapshot = collect_schema(
+                load_database_settings(for_query=True), notes,
+                manual_annotations=previous.get("manual_annotations", {}),
+            )
+            if previous:
+                snapshot["parent_version"] = previous["version"]
+                snapshot["change"] = {"source": "database_sync"}
+                if previous.get("annotations_updated_at"):
+                    snapshot["annotations_updated_at"] = previous["annotations_updated_at"]
             store.save(snapshot)
             print("Mode: schema_sync (read-only PostgreSQL metadata; local file write; no LLM)")
             print(f"Database: {snapshot['database_id']} | Schema: {snapshot['schema']}")

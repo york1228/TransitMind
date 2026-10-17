@@ -28,7 +28,7 @@ class DatabaseSettingsTests(unittest.TestCase):
     def settings_from_environment(self, overrides=None):
         environment = {"TRANSITMIND_DB_PASSWORD": FAKE_PASSWORD, **(overrides or {})}
         with patch.dict(os.environ, environment, clear=True):
-            with patch("transitmind.postgres_check.load_dotenv") as load_env:
+            with patch("transitmind.database_config.load_dotenv") as load_env:
                 settings = load_database_settings()
         return settings, load_env
 
@@ -63,7 +63,7 @@ class DatabaseSettingsTests(unittest.TestCase):
             "TRANSITMIND_DB_PASSWORD": FAKE_PASSWORD,
             "TRANSITMIND_QUERY_DB_USER": "transitmind_reader",
             "TRANSITMIND_QUERY_DB_PASSWORD": query_password,
-        }, clear=True), patch("transitmind.postgres_check.load_dotenv"):
+        }, clear=True), patch("transitmind.database_config.load_dotenv"):
             admin = load_database_settings()
             query = load_database_settings(for_query=True)
         self.assertEqual((admin.user, admin.password), ("postgres", FAKE_PASSWORD))
@@ -76,7 +76,7 @@ class DatabaseSettingsTests(unittest.TestCase):
                          {"TRANSITMIND_QUERY_DB_USER": "postgres", "TRANSITMIND_QUERY_DB_PASSWORD": FAKE_PASSWORD}):
             with self.subTest(override=override), patch.dict(os.environ, {
                 "TRANSITMIND_DB_PASSWORD": FAKE_PASSWORD, **override,
-            }, clear=True), patch("transitmind.postgres_check.load_dotenv"):
+            }, clear=True), patch("transitmind.database_config.load_dotenv"):
                 with self.assertRaises(DatabaseCheckError) as raised:
                     load_database_settings(for_query=True)
                 self.assertIn("TRANSITMIND_QUERY_DB", str(raised.exception))
@@ -102,7 +102,7 @@ class DatabaseSettingsTests(unittest.TestCase):
     def test_local_environment_file_errors_are_redacted(self):
         for error_type in (OSError, ValueError):
             with self.subTest(error_type=error_type):
-                with patch("transitmind.postgres_check.load_dotenv",
+                with patch("transitmind.database_config.load_dotenv",
                            side_effect=error_type(f"private configuration diagnostic {FAKE_PASSWORD}")):
                     with self.assertRaises(DatabaseCheckError) as raised:
                         load_database_settings()

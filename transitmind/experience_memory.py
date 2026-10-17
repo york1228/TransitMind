@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .models import Message, QueryExperience
-from .postgres_check import EXPECTED_DATABASE
+from .database_config import EXPECTED_DATABASE
 
 
 DEFAULT_FILE = Path(__file__).resolve().parent.parent / "data" / "memory" / "experiences.json"

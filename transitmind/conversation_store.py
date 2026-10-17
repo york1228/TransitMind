@@ -51,6 +51,7 @@ class JsonConversationStore:
                 content=item["content"],
                 tool_calls=tuple(ToolCall(**call) for call in item.get("tool_calls", ())),
                 tool_call_id=item.get("tool_call_id"),
+                usage=item.get("usage"),
             )
             for item in data["messages"]
         )

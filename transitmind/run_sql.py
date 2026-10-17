@@ -9,28 +9,30 @@ from sqlglot import ErrorLevel, exp
 from sqlglot.errors import SqlglotError
 
 from .models import ToolResult
-from .postgres_check import (
-    CHECK_SQL, EXPECTED_DATABASE, EXPECTED_QUERY_USER, READ_ONLY_OPTIONS, DatabaseSettings,
+from .database_config import (
+    CHECK_SQL, EXPECTED_DATABASE, EXPECTED_QUERY_USER, DatabaseSettings,
+)
+# 兼容原常量导入路径；规则只在 sql_policy 中维护。
+from .sql_policy import (
+    ALLOWED_FUNCTIONS, ALLOWED_JOINS, ALLOWED_JOIN_KINDS, ALLOWED_JOIN_SIDES, ALLOWED_TABLES,
+    CONNECT_TIMEOUT_SECONDS, JOIN_KEYS, MAX_JOINS, MAX_ROWS, MAX_SQL_LENGTH, MAX_TABLES,
+    MIN_SQL_LENGTH, MODEL_PREVIEW_ROWS, READ_ONLY_OPTIONS, SQL_READ_ONLY_OPTIONS, SQL_SCHEMA,
+    join_type_description,
 )
 
-
-MAX_ROWS = 100
-# 模型始终只看前 12 行；运行记录和未来页面保留最多 100 行。
-MODEL_PREVIEW_ROWS = 12
-MAX_SQL_LENGTH = 8000
-ALLOWED_TABLES = {"agency", "routes", "stops", "calendar", "calendar_dates", "trips", "stop_times"}
-SQL_READ_ONLY_OPTIONS = READ_ONLY_OPTIONS + " -c search_path=pg_catalog,public -c lock_timeout=5000"
 
 # 本课开放七张表的单表读取，以及一条已声明关系上的两表 JOIN。
 # 停站记录通过 trip_id 连到班次，通过 stop_id 连到站点；日历表仍单独查询。
 # 用解析后的节点限定能力，不靠危险关键词黑名单；不是完整生产 SQL 安全策略。
+_FUNCTION_NODES = {"COUNT": exp.Count, "LOWER": exp.Lower, "UPPER": exp.Upper}
 ALLOWED_NODES = (
     exp.Select, exp.From, exp.Table, exp.TableAlias, exp.Identifier,
     exp.Column, exp.Star, exp.Alias, exp.Literal, exp.Null, exp.Boolean,
     exp.Where, exp.Order, exp.Ordered, exp.Group, exp.Having, exp.Limit, exp.Distinct, exp.Join,
     exp.EQ, exp.NEQ, exp.GT, exp.GTE, exp.LT, exp.LTE,
     exp.And, exp.Or, exp.Not, exp.Is, exp.In, exp.Between, exp.Like, exp.ILike, exp.Paren,
-    exp.Count, exp.Lower, exp.Upper,
+    # 映射负责对应解析器类型，真正允许哪些函数由策略中的名称决定。
+    *(_FUNCTION_NODES[name] for name in ALLOWED_FUNCTIONS),
 )
 
 DATABASE_ERRORS = {
@@ -56,29 +58,24 @@ def prepare_sql(sql: str) -> str:
                 raise ValueError(f"This lesson does not support {node.key}. Use a simple SELECT on the configured GTFS tables.")
 
         tables = list(statement.find_all(exp.Table))
-        if not 1 <= len(tables) <= 2 or any(
-            table.name not in ALLOWED_TABLES or table.db not in {"", "public"} or table.catalog for table in tables
+        if not 1 <= len(tables) <= MAX_TABLES or any(
+            table.name not in ALLOWED_TABLES or table.db not in {"", SQL_SCHEMA} or table.catalog for table in tables
         ):
-            raise ValueError("Only the configured public GTFS tables are enabled in this lesson.")
+            raise ValueError(f"Only the configured {SQL_SCHEMA} GTFS tables are enabled in this lesson.")
         joins = statement.args.get("joins") or []
         if len(tables) == 2:
             aliases = {table.alias_or_name: table.name for table in tables}
             table_pair = frozenset(table.name for table in tables)
-            join_keys = {
-                frozenset(("agency", "routes")): "agency_id",
-                frozenset(("routes", "trips")): "route_id",
-                frozenset(("trips", "stop_times")): "trip_id",
-                frozenset(("stops", "stop_times")): "stop_id",
-            }
-            if len(aliases) != 2 or table_pair not in join_keys or len(joins) != 1:
-                raise ValueError("Use one declared agency/routes, routes/trips, trips/stop_times or stops/stop_times join; no self joins.")
+            if len(aliases) != 2 or table_pair not in JOIN_KEYS or len(joins) != MAX_JOINS:
+                pairs = ", ".join(f"{left}/{right}" for left, right in ALLOWED_JOINS)
+                raise ValueError(f"Use one declared {pairs} join; no self joins.")
             join = joins[0]
             on = join.args.get("on")
-            if (join.side not in {"", "LEFT"} or join.kind not in {"", "INNER", "OUTER"}
+            if (join.side not in ALLOWED_JOIN_SIDES or join.kind not in ALLOWED_JOIN_KINDS
                     or not isinstance(on, exp.EQ)):
-                raise ValueError("Use INNER/LEFT JOIN with the declared foreign-key columns.")
+                raise ValueError(f"Use {join_type_description()} JOIN with the declared foreign-key columns.")
             keys = (on.this, on.expression)
-            expected_key = join_keys[table_pair]
+            expected_key = JOIN_KEYS[table_pair]
             if (any(not isinstance(key, exp.Column) or key.name != expected_key for key in keys)
                     or {aliases.get(key.table) for key in keys} != table_pair):
                 raise ValueError(f"JOIN must match the two qualified {expected_key} columns; filters belong in WHERE.")
@@ -86,7 +83,7 @@ def prepare_sql(sql: str) -> str:
             raise ValueError("A join must use one declared relationship; standalone GTFS queries are allowed.")
         # 固定 public，避免同名表或临时表改变查询目标。
         for table in tables:
-            table.set("db", exp.to_identifier("public"))
+            table.set("db", exp.to_identifier(SQL_SCHEMA))
 
         # 保留用户更小的 LIMIT；多取一行，仅用于判断结果是否被截断。
         row_limit = MAX_ROWS + 1
@@ -106,11 +103,11 @@ def run_sql(settings: DatabaseSettings, arguments: dict[str, Any]) -> ToolResult
     if set(arguments) != {"sql"} or not isinstance(arguments.get("sql"), str):
         return ToolResult(False, "Provide exactly one string argument named sql.", "invalid_arguments")
     sql = arguments["sql"].strip()
-    if not sql or len(sql) > MAX_SQL_LENGTH:
-        return ToolResult(False, "SQL must contain 1 to 8000 characters.", "invalid_arguments")
+    if not MIN_SQL_LENGTH <= len(sql) <= MAX_SQL_LENGTH:
+        return ToolResult(False, f"SQL must contain {MIN_SQL_LENGTH} to {MAX_SQL_LENGTH} characters.", "invalid_arguments")
     metadata: dict[str, Any] = {
         "tool_name": "run_sql", "source": "postgresql",
-        "database": EXPECTED_DATABASE, "schema": "public",
+        "database": EXPECTED_DATABASE, "schema": SQL_SCHEMA,
         "read_only": True, "original_sql": sql,
     }
     try:
@@ -123,10 +120,10 @@ def run_sql(settings: DatabaseSettings, arguments: dict[str, Any]) -> ToolResult
             or settings.database != EXPECTED_DATABASE or settings.user != EXPECTED_QUERY_USER):
         return ToolResult(False, "Use the local transitmind database and transitmind_reader account.", "invalid_database", metadata=metadata)
     try:
-        # 模型只提供 SQL，不接触凭据。每次连接开启只读和 5 秒超时，用完就关闭。
+        # 模型只提供 SQL，不接触凭据。每次连接开启只读和策略中的查询超时，用完就关闭。
         with psycopg.connect(
             host=settings.host, port=settings.port, dbname=settings.database, user=settings.user,
-            password=settings.password, connect_timeout=5, autocommit=True,
+            password=settings.password, connect_timeout=CONNECT_TIMEOUT_SECONDS, autocommit=True,
             options=SQL_READ_ONLY_OPTIONS, application_name="transitmind_run_sql",
         ) as connection:
             with connection.cursor() as cursor:
@@ -147,7 +144,7 @@ def run_sql(settings: DatabaseSettings, arguments: dict[str, Any]) -> ToolResult
         return ToolResult(False, message, code, metadata=metadata)
 
     truncated = len(rows) > MAX_ROWS
-    # 日期、Decimal 等转换成 JSON 可保存的值；第 101 行只用来判断截断。
+    # 日期、Decimal 等转换成 JSON 可保存的值；额外读取的那一行只用来判断截断。
     result_rows = json.loads(json.dumps(rows[:MAX_ROWS], ensure_ascii=False, default=str))
     preview_rows = result_rows[:MODEL_PREVIEW_ROWS]
     preview_truncated = len(result_rows) > len(preview_rows)
@@ -158,7 +155,7 @@ def run_sql(settings: DatabaseSettings, arguments: dict[str, Any]) -> ToolResult
     })
     # 这份短预览交给模型；完整的保留结果通过 metadata 交给 trace 和页面。
     content = {
-        "source": "postgresql", "database": EXPECTED_DATABASE, "schema": "public",
+        "source": "postgresql", "database": EXPECTED_DATABASE, "schema": SQL_SCHEMA,
         "read_only": True, "sql": executed_sql, "columns": columns,
         "rows": preview_rows, "row_count": len(result_rows),
         "displayed_row_count": len(preview_rows), "row_limit": MAX_ROWS,

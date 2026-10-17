@@ -10,11 +10,8 @@ from urllib.parse import urlsplit
 from dotenv import load_dotenv
 from openai import APIConnectionError, APIError, APIStatusError, APITimeoutError, AuthenticationError, OpenAI
 
-from .models import Message, ToolCall, ToolDefinition
-
-
-class ModelCallError(RuntimeError):
-    """A safe diagnostic for a failed or unusable model response."""
+# 保留旧模块的 ModelCallError 导出；核心循环直接依赖公共类型，不依赖 SDK。
+from .models import Message, ModelCallError, ToolCall, ToolDefinition
 
 
 def message_to_api(message: Message) -> dict[str, Any]:
@@ -55,16 +52,22 @@ class DeepSeekModel:
         self.client = client
         self.model = model
 
-    def complete(self, messages: Sequence[Message], tools: Sequence[ToolDefinition]) -> Message:
+    def complete(
+        self, messages: Sequence[Message], tools: Sequence[ToolDefinition], *,
+        max_tokens: int = 1536, json_output: bool = False,
+    ) -> Message:
         request: dict[str, Any] = {
             "model": self.model,
             "messages": [message_to_api(message) for message in messages],
             # 工具结果可能包含多行数据，给最终的中文总结留出空间。
-            "max_tokens": 1536,
+            "max_tokens": max_tokens,
             "stream": False,
             # DeepSeek defaults to thinking mode, which needs extra history fields.
             "extra_body": {"thinking": {"type": "disabled"}},
         }
+        # 元数据起草只需要一个 JSON 对象；普通 Agent 调用仍沿用原来的默认设置。
+        if json_output:
+            request["response_format"] = {"type": "json_object"}
         if tools:
             request["tools"] = [tool_to_api(tool) for tool in tools]
             request["tool_choice"] = "auto"
@@ -84,38 +87,47 @@ class DeepSeekModel:
         except APIError:
             raise ModelCallError("The DeepSeek SDK could not complete the request.") from None
 
+        # 先提取 API 实际用量：达到输出上限等不可接受的回复也可能已经消耗 Token。
+        # 用 API token 的实际统计，不按字符估算；未返回 usage 时保留为 None。
+        api_usage = getattr(response, "usage", None)
+        usage = None if api_usage is None else {
+            "prompt_tokens": api_usage.prompt_tokens,
+            "completion_tokens": api_usage.completion_tokens,
+            "total_tokens": api_usage.total_tokens,
+        }
         if not response.choices:
-            raise ModelCallError("DeepSeek returned no response choices.")
+            raise ModelCallError("DeepSeek returned no response choices.", usage=usage)
         choice = response.choices[0]
         if choice.finish_reason not in {"stop", "tool_calls"}:
             if choice.finish_reason == "length":
                 raise ModelCallError(
                     "DeepSeek response hit the output token limit. "
-                    "Use a narrower query or let the Agent summarize truncated results."
+                    "Use a narrower query or let the Agent summarize truncated results.",
+                    usage=usage,
                 )
             raise ModelCallError(
                 f"DeepSeek stopped with finish_reason={choice.finish_reason!r}; "
-                "no final answer was accepted."
+                "no final answer was accepted.", usage=usage,
             )
         reply = choice.message
         if reply.role != "assistant":
-            raise ModelCallError("DeepSeek must return an assistant message.")
+            raise ModelCallError("DeepSeek must return an assistant message.", usage=usage)
         if getattr(reply, "reasoning_content", None):
-            raise ModelCallError("Lesson 2 requires non-thinking mode; the API returned thinking content.")
+            raise ModelCallError("Lesson 2 requires non-thinking mode; the API returned thinking content.", usage=usage)
 
         calls = []
         for call in reply.tool_calls or ():
             if call.type != "function":
-                raise ModelCallError("Only function tool calls are supported in this lesson.")
+                raise ModelCallError("Only function tool calls are supported in this lesson.", usage=usage)
             try:
                 arguments = json.loads(call.function.arguments)
             except (json.JSONDecodeError, TypeError):
-                raise ModelCallError("DeepSeek returned invalid JSON tool arguments.") from None
+                raise ModelCallError("DeepSeek returned invalid JSON tool arguments.", usage=usage) from None
             if not isinstance(arguments, dict):
-                raise ModelCallError("DeepSeek tool arguments must be a JSON object.")
+                raise ModelCallError("DeepSeek tool arguments must be a JSON object.", usage=usage)
             calls.append(ToolCall(call.id, call.function.name, arguments))
 
-        return Message("assistant", reply.content or "", tool_calls=tuple(calls))
+        return Message("assistant", reply.content or "", tool_calls=tuple(calls), usage=usage)
 
 
 def build_deepseek_model() -> DeepSeekModel:

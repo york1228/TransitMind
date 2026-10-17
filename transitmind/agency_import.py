@@ -11,7 +11,7 @@ from pathlib import Path
 import psycopg
 from psycopg import cursor
 
-from .postgres_check import DatabaseCheckError, DatabaseSettings, EXPECTED_DATABASE, load_database_settings
+from .database_config import DatabaseCheckError, DatabaseSettings, EXPECTED_DATABASE, load_database_settings
 
 
 # 默认读取本项目中的数据副本；仍可用 --source 指定其他 GTFS 目录。

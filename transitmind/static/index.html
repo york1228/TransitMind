@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>TransitMind · 数据工作台</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/static/style.css?v=20261016-usage">
+  <script defer src="/static/vendor/lucide.min.js"></script>
+  <script defer src="/static/vendor/marked.umd.js"></script>
+  <script defer src="/static/vendor/purify.min.js"></script>
+  <script defer src="/static/app.js?v=20261017-model-error-trace"></script>
+</head>
+<body>
+  <div class="app-shell">
+    <button id="sidebar-backdrop" class="sidebar-backdrop" aria-label="关闭运行记录" hidden></button>
+    <aside class="sidebar" id="sidebar">
+      <a class="brand" href="/" aria-label="TransitMind 首页">
+        <span class="brand-mark"><i data-lucide="route" aria-hidden="true"></i></span>
+        <span>TransitMind</span>
+      </a>
+      <div class="sidebar-heading">
+        <span><i data-lucide="history" aria-hidden="true"></i>运行记录</span>
+        <button class="icon-button" id="refresh-history" title="刷新记录" aria-label="刷新记录"><i data-lucide="refresh-cw"></i></button>
+      </div>
+      <button class="new-run-button" id="new-run"><i data-lucide="plus" aria-hidden="true"></i>新查询</button>
+      <div class="history-list" id="history-list" aria-label="运行记录列表"></div>
+      <div class="sidebar-footer">
+        <i data-lucide="monitor" aria-hidden="true"></i>
+        <div><span>本地工作台</span><code id="local-address"></code></div>
+      </div>
+    </aside>
+
+    <main class="workspace">
+      <header class="app-header">
+        <button class="icon-button mobile-menu" id="toggle-sidebar" title="运行记录" aria-label="展开运行记录" aria-expanded="false"><i data-lucide="panel-left"></i></button>
+        <nav class="view-tabs" aria-label="工作视图" role="tablist">
+          <button class="view-tab active" id="query-tab" data-view="query" role="tab" aria-selected="true" aria-controls="query-panel"><i data-lucide="message-square" aria-hidden="true"></i>查询</button>
+          <button class="view-tab" id="debug-tab" data-view="debug" role="tab" aria-selected="false" aria-controls="debug-panel"><i data-lucide="workflow" aria-hidden="true"></i>调试</button>
+          <button class="view-tab" id="schema-tab" data-view="schema" role="tab" aria-selected="false" aria-controls="schema-panel"><i data-lucide="table-2" aria-hidden="true"></i>Schema</button>
+        </nav>
+        <div class="header-actions">
+          <span class="database-label"><i data-lucide="database" aria-hidden="true"></i>PostgreSQL<span class="read-only">只读</span></span>
+          <span class="header-divider"></span>
+          <button class="icon-button" id="open-record" title="打开 JSON 或文本运行记录" aria-label="打开运行记录"><i data-lucide="folder-open"></i></button>
+          <button class="icon-button" id="download-record" title="下载当前 JSON 记录" aria-label="下载当前记录" disabled><i data-lucide="download"></i></button>
+          <input type="file" id="record-file" accept=".json,.txt,application/json,text/plain" hidden>
+        </div>
+      </header>
+
+      <div class="workspace-body">
+        <section class="composer" id="query-composer" aria-labelledby="page-title">
+          <div class="section-heading">
+            <h1 id="page-title"><span class="desktop-title">数据查询</span><span class="mobile-title">TransitMind</span></h1>
+            <span class="snapshot-label" id="snapshot-label">Schema</span>
+          </div>
+          <form id="query-form">
+            <label class="sr-only" for="question">问题</label>
+            <textarea id="question" name="question" rows="3" maxlength="4000" placeholder="每个交通机构有多少条线路？" required></textarea>
+            <div class="composer-toolbar">
+              <div class="query-settings">
+                <label class="select-field" for="retrieval-mode">
+                  <span>Schema 检索</span>
+                  <select id="retrieval-mode" name="schema_retrieval">
+                    <option value="off">实时表结构</option>
+                    <option value="keyword" selected>关键词</option>
+                    <option value="vector">向量</option>
+                    <option value="graph">图检索</option>
+                    <option value="hybrid">混合 · RRF</option>
+                  </select>
+                </label>
+                <label class="switch-field" for="schema-expand">
+                  <input id="schema-expand" type="checkbox" role="switch">
+                  <span class="switch-track" aria-hidden="true"></span>
+                  <span>定向扩展</span>
+                </label>
+                <label class="number-field" for="max-turns"><span>轮次上限</span><input id="max-turns" type="number" min="1" max="12" step="1" value="4"></label>
+                <label class="number-field" for="max-tools"><span>工具上限</span><input id="max-tools" type="number" min="0" step="1" placeholder="默认" title="所有工具合计的尝试次数，失败也计数；0 禁止工具调用"></label>
+                <label class="number-field" for="max-sql"><span>SQL 上限</span><input id="max-sql" type="number" min="0" step="1" placeholder="默认" title="SQL 尝试次数，失败也计数；0 禁止 SQL 调用"></label>
+              </div>
+              <button class="run-button" id="run-button" type="submit"><i data-lucide="play" aria-hidden="true"></i><span>运行查询</span></button>
+            </div>
+          </form>
+        </section>
+
+        <div class="notice" id="notice" role="alert" hidden></div>
+        <section class="run-overview" id="run-overview" aria-label="本次运行" hidden>
+          <div class="run-heading"><span class="status-badge" id="run-status"></span><span class="run-question" id="run-question"></span></div>
+          <div class="run-metrics" id="run-metrics"></div>
+        </section>
+        <section class="usage-summary" id="usage-summary" aria-label="耗时与 Token 用量" hidden>
+          <dl class="usage-values" id="usage-values"></dl>
+          <div class="subtle" id="usage-note"></div>
+        </section>
+
+        <div class="empty-state" id="empty-state">
+          <span class="empty-mark"><i data-lucide="network" aria-hidden="true"></i></span>
+          <h2>等待查询</h2>
+          <span class="empty-caption">TransitMind · 交通数据</span>
+        </div>
+
+        <section id="query-panel" class="result-panel" role="tabpanel" aria-labelledby="query-tab" hidden></section>
+
+        <section id="schema-panel" class="schema-catalog" role="tabpanel" aria-labelledby="schema-tab" hidden>
+          <div class="section-heading">
+            <h1>Schema</h1>
+            <div class="schema-catalog-actions">
+              <span class="read-only">元数据</span>
+              <button class="icon-button" id="refresh-schema" title="重新读取快照" aria-label="重新读取 Schema 快照"><i data-lucide="refresh-cw"></i></button>
+            </div>
+          </div>
+          <div class="schema-catalog-meta" id="schema-catalog-meta"></div>
+          <section class="schema-index-status" aria-labelledby="schema-index-title">
+            <div class="content-heading">
+              <h2 id="schema-index-title">索引版本</h2>
+              <button class="icon-button" id="refresh-schema-status" title="刷新索引版本状态" aria-label="刷新索引版本状态"><i data-lucide="refresh-cw"></i></button>
+            </div>
+            <div class="subtle schema-status-version" id="schema-status-version"></div>
+            <div class="inline-error" id="schema-status-error" role="status" hidden></div>
+            <div class="table-scroll">
+              <table class="data-table schema-status-table">
+                <thead><tr><th>索引</th><th>状态</th><th>版本</th><th>最近记录</th><th>操作</th></tr></thead>
+                <tbody id="schema-status-rows"><tr><td colspan="5">尚未读取</td></tr></tbody>
+              </table>
+            </div>
+          </section>
+          <div class="notice" id="schema-notice" role="status" hidden></div>
+          <div class="schema-catalog-layout" id="schema-catalog-layout" hidden>
+            <aside class="schema-table-navigation" aria-label="Schema 表目录">
+              <label class="schema-search" for="schema-search"><i data-lucide="search" aria-hidden="true"></i><input id="schema-search" type="search" placeholder="表名、字段或中文说明" aria-label="筛选 Schema 表"></label>
+              <div class="subtle" id="schema-table-count" aria-live="polite"></div>
+              <div class="schema-table-list" id="schema-table-list"></div>
+            </aside>
+            <article class="schema-table-detail" id="schema-table-detail" aria-live="polite"></article>
+          </div>
+        </section>
+
+        <section id="debug-panel" class="result-panel" role="tabpanel" aria-labelledby="debug-tab" hidden>
+          <div class="debug-layout">
+            <aside class="step-navigation" id="step-navigation" aria-label="执行步骤"></aside>
+            <article class="step-detail" id="step-detail"></article>
+          </div>
+          <details class="raw-record">
+            <summary><i data-lucide="file-json" aria-hidden="true"></i>原始记录</summary>
+            <pre id="raw-record-content"></pre>
+          </details>
+        </section>
+      </div>
+      <footer class="workspace-footer"><span>TransitMind</span><span id="footer-status">本地会话</span></footer>
+    </main>
+  </div>
+  <div class="toast" id="toast" role="status" hidden></div>
+</body>
+</html>

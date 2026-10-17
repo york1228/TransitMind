@@ -6,8 +6,12 @@ from typing import Any
 
 import psycopg
 
+from .database_config import CHECK_SQL, EXPECTED_DATABASE, READ_ONLY_OPTIONS, DatabaseSettings
 from .models import ToolDefinition, ToolResult
-from .postgres_check import CHECK_SQL, EXPECTED_DATABASE, READ_ONLY_OPTIONS, DatabaseSettings
+from .sql_policy import (
+    CONNECT_TIMEOUT_SECONDS, MAX_ROWS, MAX_SQL_LENGTH, MIN_SQL_LENGTH,
+    MODEL_PREVIEW_ROWS, QUERY_TIMEOUT_MS, sql_scope_description,
+)
 from .tools import Tool, ToolRegistry
 
 
@@ -73,7 +77,7 @@ def describe_table(settings: DatabaseSettings, arguments: dict[str, Any]) -> Too
         # 复用连接检查的只读选项和超时。with 结束后关闭连接，不保留后台连接。
         with psycopg.connect(
             host=settings.host, port=settings.port, dbname=settings.database, user=settings.user,
-            password=settings.password, connect_timeout=5, autocommit=True,
+            password=settings.password, connect_timeout=CONNECT_TIMEOUT_SECONDS, autocommit=True,
             options=READ_ONLY_OPTIONS, application_name="transitmind_schema_tool",
         ) as connection:
             with connection.cursor() as cursor:
@@ -129,7 +133,7 @@ def describe_table(settings: DatabaseSettings, arguments: dict[str, Any]) -> Too
 
 def build_postgres_tools(
     settings: DatabaseSettings, *, include_sql: bool = False, include_schema_memory: bool = False,
-    schema_retrieval_mode: str = "keyword",
+    schema_retrieval_mode: str = "keyword", include_schema_expand: bool = False,
 ) -> ToolRegistry:
     registry = ToolRegistry()
     registry.register(
@@ -153,9 +157,16 @@ def build_postgres_tools(
     )
     if include_schema_memory:
         from .schema_memory import build_schema_tool
+        from .schema_store import JsonSchemaStore
 
         # 新工具负责找相关表；原 describe_table 仍可读取最新结构，run_sql 仍负责业务查询。
-        registry.register(build_schema_tool(settings.database, schema_retrieval_mode))
+        snapshot = JsonSchemaStore().load()
+        registry.register(build_schema_tool(settings.database, schema_retrieval_mode, snapshot=snapshot))
+        if include_schema_expand:
+            from .schema_expand import build_schema_expand_tool
+
+            # 找表和扩表共用启动时的快照，避免一次问答混用不同 Schema 版本。
+            registry.register(build_schema_expand_tool(snapshot))
     if include_sql:
         from .run_sql import run_sql
 
@@ -163,16 +174,14 @@ def build_postgres_tools(
             definition=ToolDefinition(
                 name="run_sql",
                 description=(
-                    "Execute one read-only PostgreSQL SELECT on the configured public GTFS tables after retrieving schemas. "
-                    "Supports simple WHERE, ORDER BY, GROUP BY, COUNT, LOWER and UPPER. "
-                    "One INNER or LEFT JOIN is allowed between agency/routes on agency_id, routes/trips on route_id, "
-                    "trips/stop_times on trip_id or stops/stop_times on stop_id with explicit ON; calendar tables are standalone. "
-                    "No cross joins, subqueries, WITH, writes or arbitrary functions. Returns column names, "
-                    "up to 12 preview rows, the retained row count (up to 100) and truncation flags; execution is limited to 5 seconds."
+                    "Execute a read-only PostgreSQL SELECT after retrieving schemas. "
+                    + sql_scope_description()
+                    + f"Returns column names, up to {MODEL_PREVIEW_ROWS} preview rows, the retained row count "
+                    f"(up to {MAX_ROWS}) and truncation flags; execution is limited to {QUERY_TIMEOUT_MS / 1000:g} seconds."
                 ),
                 parameters={
                     "type": "object",
-                    "properties": {"sql": {"type": "string", "minLength": 1, "maxLength": 8000}},
+                    "properties": {"sql": {"type": "string", "minLength": MIN_SQL_LENGTH, "maxLength": MAX_SQL_LENGTH}},
                     "required": ["sql"], "additionalProperties": False,
                 },
             ),

@@ -1,0 +1,69 @@
+{
+  "agency": {
+    "description": "交通运营机构，每行代表一个机构。",
+    "keywords": ["交通机构", "机构", "运营商", "运营机构"],
+    "columns": {
+      "agency_id": "机构 ID，保留文本类型。",
+      "agency_name": "机构名称。"
+    }
+  },
+  "routes": {
+    "description": "计划线路，每行代表一条线路；通过 agency_id 关联运营机构。",
+    "keywords": ["线路", "路线"],
+    "columns": {
+      "route_id": "线路 ID。",
+      "agency_id": "所属运营机构 ID。",
+      "route_short_name": "线路简称。",
+      "route_long_name": "线路完整名称。"
+    }
+  },
+  "trips": {
+    "description": "计划班次，通过 route_id 关联线路。整个快照中的班次数不等于某一天实际开行次数。",
+    "keywords": ["班次", "计划班次", "排班"],
+    "columns": {
+      "trip_id": "计划班次 ID。",
+      "route_id": "所属线路 ID。",
+      "service_id": "服务日历标识；当前 SQL 工具尚未开放日历关联。",
+      "trip_headsign": "班次目的地方向显示文字。"
+    }
+  },
+  "stops": {
+    "description": "站点与站点层级信息，每行代表一个 GTFS 站点条目，不是停站事件。",
+    "keywords": ["站点", "车站", "站名", "市镇"],
+    "columns": {
+      "stop_id": "站点 ID。",
+      "stop_name": "站点名称。",
+      "municipality": "站点所属市镇。",
+      "parent_station": "父站点 ID；是否有数据库外键以读取的约束为准。"
+    }
+  },
+  "stop_times": {
+    "description": "计划班次的逐站停靠记录，通过 trip_id 关联班次、stop_id 关联站点。每行是一次计划停站，不是客流或实时到站信息。",
+    "keywords": ["停站", "停靠", "到站", "离站", "计划停站", "计划停靠"],
+    "columns": {
+      "trip_id": "所属计划班次 ID。",
+      "stop_id": "停靠站点 ID。",
+      "stop_sequence": "该站在班次中的停靠顺序；LEFT JOIN 计数可统计此非空字段。",
+      "arrival_time": "计划到站时刻，文本服务日时间，可能超过 24:00:00。",
+      "departure_time": "计划离站时刻，文本服务日时间，可能超过 24:00:00。"
+    }
+  },
+  "calendar": {
+    "description": "服务日历，记录日期范围和每周哪些天提供服务；当前只开放单表查询。",
+    "keywords": ["服务日历", "星期", "每周", "工作日", "周末"],
+    "columns": {
+      "service_id": "服务日历标识。",
+      "start_date": "服务有效开始日期。",
+      "end_date": "服务有效结束日期。"
+    }
+  },
+  "calendar_dates": {
+    "description": "服务日历的特定日期例外，可增加或取消服务；当前只开放单表查询。",
+    "keywords": ["日历例外", "例外日期", "特定日期", "取消服务", "增加服务"],
+    "columns": {
+      "service_id": "服务日历标识。",
+      "date": "发生例外的日期。",
+      "exception_type": "例外类型编码。"
+    }
+  }
+}
