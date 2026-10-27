@@ -9,7 +9,7 @@ from typing import Any
 
 from .agent import DEFAULT_MAX_SQL_ATTEMPTS, DEFAULT_MAX_TOOL_CALLS
 from .database_config import EXPECTED_DATABASE
-from .models import AgentRun, Message
+from .models import AgentRun, Message, TraceEvent
 from .runtime import CONVERSATION_SYSTEM_PROMPT, EXPERIENCE_SYSTEM_PROMPT, build_agent
 
 
@@ -19,13 +19,14 @@ class QueryExecution:
     payload: dict[str, Any]
     conversation_saved_path: Path | None = None
 
-
+# 复用已有的历史读取、Agent 调用和成功保存流程
 def execute_query(
     question: str, *, live: bool = False, database: bool = False, sql: bool = False,
     table: str | None = None, max_model_turns: int = 4, schema_memory: bool = False,
     schema_retrieval: str = "keyword", schema_expand: bool = False,
     conversation_id: str | None = None, history_turns: int = 3, experience_memory: bool = False,
     on_prepared: Callable[[dict[str, Any], str], None] | None = None,
+    on_event: Callable[[TraceEvent], None] | None = None,
     max_tool_calls: int = DEFAULT_MAX_TOOL_CALLS,
     max_sql_attempts: int = DEFAULT_MAX_SQL_ATTEMPTS,
 ) -> QueryExecution:
@@ -90,7 +91,8 @@ def execute_query(
             # CLI 可在模型请求前打印概要；应用层自身不输出终端或 HTTP 内容。
             on_prepared({"mode": mode, "question": question, **context_metadata}, detail)
 
-        result = agent.run(question, history=history, context_messages=context_messages)
+        # 事件在发生时交给网页；完整结果仍在运行结束后统一封装。
+        result = agent.run(question, history=history, context_messages=context_messages, on_event=on_event)
         if store is not None and conversation is not None and result.stop_reason == "completed":
             # 跳过 system、历史和本次参考经验，只把真正的新问答写进会话。
             new_messages = result.messages[1 + len(history) + len(context_messages):]

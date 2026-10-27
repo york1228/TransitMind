@@ -6,11 +6,11 @@
   <meta name="color-scheme" content="light">
   <title>TransitMind · 数据工作台</title>
   <link rel="icon" href="data:,">
-  <link rel="stylesheet" href="/static/style.css?v=20261016-usage">
+  <link rel="stylesheet" href="/static/style.css?v=20261028-detail-sidebar">
   <script defer src="/static/vendor/lucide.min.js"></script>
   <script defer src="/static/vendor/marked.umd.js"></script>
   <script defer src="/static/vendor/purify.min.js"></script>
-  <script defer src="/static/app.js?v=20261017-model-error-trace"></script>
+  <script defer src="/static/app.js?v=20261028-detail-sidebar"></script>
 </head>
 <body>
   <div class="app-shell">
@@ -24,7 +24,7 @@
         <span><i data-lucide="history" aria-hidden="true"></i>运行记录</span>
         <button class="icon-button" id="refresh-history" title="刷新记录" aria-label="刷新记录"><i data-lucide="refresh-cw"></i></button>
       </div>
-      <button class="new-run-button" id="new-run"><i data-lucide="plus" aria-hidden="true"></i>新查询</button>
+      <button class="new-run-button" id="new-run"><i data-lucide="plus" aria-hidden="true"></i><span id="new-run-label">新查询</span></button>
       <div class="history-list" id="history-list" aria-label="运行记录列表"></div>
       <div class="sidebar-footer">
         <i data-lucide="monitor" aria-hidden="true"></i>
@@ -39,6 +39,7 @@
           <button class="view-tab active" id="query-tab" data-view="query" role="tab" aria-selected="true" aria-controls="query-panel"><i data-lucide="message-square" aria-hidden="true"></i>查询</button>
           <button class="view-tab" id="debug-tab" data-view="debug" role="tab" aria-selected="false" aria-controls="debug-panel"><i data-lucide="workflow" aria-hidden="true"></i>调试</button>
           <button class="view-tab" id="schema-tab" data-view="schema" role="tab" aria-selected="false" aria-controls="schema-panel"><i data-lucide="table-2" aria-hidden="true"></i>Schema</button>
+          <button class="view-tab" id="statistics-tab" data-view="statistics" role="tab" aria-selected="false" aria-controls="statistics-panel"><i data-lucide="chart-no-axes-combined" aria-hidden="true"></i>统计</button>
         </nav>
         <div class="header-actions">
           <span class="database-label"><i data-lucide="database" aria-hidden="true"></i>PostgreSQL<span class="read-only">只读</span></span>
@@ -49,40 +50,11 @@
         </div>
       </header>
 
-      <div class="workspace-body">
-        <section class="composer" id="query-composer" aria-labelledby="page-title">
-          <div class="section-heading">
-            <h1 id="page-title"><span class="desktop-title">数据查询</span><span class="mobile-title">TransitMind</span></h1>
-            <span class="snapshot-label" id="snapshot-label">Schema</span>
-          </div>
-          <form id="query-form">
-            <label class="sr-only" for="question">问题</label>
-            <textarea id="question" name="question" rows="3" maxlength="4000" placeholder="每个交通机构有多少条线路？" required></textarea>
-            <div class="composer-toolbar">
-              <div class="query-settings">
-                <label class="select-field" for="retrieval-mode">
-                  <span>Schema 检索</span>
-                  <select id="retrieval-mode" name="schema_retrieval">
-                    <option value="off">实时表结构</option>
-                    <option value="keyword" selected>关键词</option>
-                    <option value="vector">向量</option>
-                    <option value="graph">图检索</option>
-                    <option value="hybrid">混合 · RRF</option>
-                  </select>
-                </label>
-                <label class="switch-field" for="schema-expand">
-                  <input id="schema-expand" type="checkbox" role="switch">
-                  <span class="switch-track" aria-hidden="true"></span>
-                  <span>定向扩展</span>
-                </label>
-                <label class="number-field" for="max-turns"><span>轮次上限</span><input id="max-turns" type="number" min="1" max="12" step="1" value="4"></label>
-                <label class="number-field" for="max-tools"><span>工具上限</span><input id="max-tools" type="number" min="0" step="1" placeholder="默认" title="所有工具合计的尝试次数，失败也计数；0 禁止工具调用"></label>
-                <label class="number-field" for="max-sql"><span>SQL 上限</span><input id="max-sql" type="number" min="0" step="1" placeholder="默认" title="SQL 尝试次数，失败也计数；0 禁止 SQL 调用"></label>
-              </div>
-              <button class="run-button" id="run-button" type="submit"><i data-lucide="play" aria-hidden="true"></i><span>运行查询</span></button>
-            </div>
-          </form>
-        </section>
+      <div class="workspace-body" id="workspace-body">
+        <div class="section-heading" id="query-heading">
+          <h1 id="page-title"><span class="desktop-title">数据查询</span><span class="mobile-title">TransitMind</span></h1>
+          <span class="snapshot-label" id="snapshot-label">Schema</span>
+        </div>
 
         <div class="notice" id="notice" role="alert" hidden></div>
         <section class="run-overview" id="run-overview" aria-label="本次运行" hidden>
@@ -93,6 +65,7 @@
           <dl class="usage-values" id="usage-values"></dl>
           <div class="subtle" id="usage-note"></div>
         </section>
+        <section class="conversation-context" id="conversation-context" aria-label="本次会话上下文" hidden></section>
 
         <div class="empty-state" id="empty-state">
           <span class="empty-mark"><i data-lucide="network" aria-hidden="true"></i></span>
@@ -101,6 +74,24 @@
         </div>
 
         <section id="query-panel" class="result-panel" role="tabpanel" aria-labelledby="query-tab" hidden></section>
+
+        <section id="statistics-panel" class="statistics-panel" role="tabpanel" aria-labelledby="statistics-tab" hidden>
+          <div class="section-heading">
+            <h1>运行统计</h1>
+            <div class="statistics-actions">
+              <label class="sr-only" for="statistics-mode">运行模式</label>
+              <select id="statistics-mode">
+                <option value="live">真实模型</option>
+                <option value="scripted">教学脚本</option>
+                <option value="unknown">模式未记录</option>
+              </select>
+              <button class="icon-button" id="refresh-statistics" title="重新汇总本地记录" aria-label="刷新运行统计"><i data-lucide="refresh-cw"></i></button>
+            </div>
+          </div>
+          <div class="subtle" id="statistics-source"></div>
+          <div class="notice" id="statistics-notice" role="status" hidden></div>
+          <div id="statistics-content" aria-live="polite"></div>
+        </section>
 
         <section id="schema-panel" class="schema-catalog" role="tabpanel" aria-labelledby="schema-tab" hidden>
           <div class="section-heading">
@@ -147,6 +138,48 @@
           </details>
         </section>
       </div>
+
+      <section class="composer" id="query-composer" aria-label="发送问题">
+        <button class="icon-button scroll-latest" id="scroll-latest" type="button" title="回到最新结果" aria-label="回到最新结果" hidden><i data-lucide="arrow-down" aria-hidden="true"></i></button>
+        <form id="query-form">
+          <div class="conversation-toolbar">
+            <label class="switch-field" for="conversation-mode">
+              <input id="conversation-mode" type="checkbox" role="switch">
+              <span class="switch-track" aria-hidden="true"></span>
+              <span>会话模式</span>
+            </label>
+            <span class="active-conversation" id="active-conversation" aria-live="polite">独立查询</span>
+          </div>
+          <div class="composer-input">
+            <label class="sr-only" for="question">问题</label>
+            <textarea id="question" name="question" rows="2" maxlength="4000" placeholder="每个交通机构有多少条线路？" required></textarea>
+            <button class="run-button" id="run-button" type="submit" title="发送问题" aria-label="发送问题"><i data-lucide="arrow-up" aria-hidden="true"></i><span class="sr-only">发送问题</span></button>
+          </div>
+          <details class="query-options">
+            <summary><i data-lucide="sliders-horizontal" aria-hidden="true"></i><span>查询设置</span><i data-lucide="chevron-down" aria-hidden="true"></i></summary>
+            <div class="query-settings">
+              <label class="select-field" for="retrieval-mode">
+                <span>Schema 检索</span>
+                <select id="retrieval-mode" name="schema_retrieval">
+                  <option value="off">实时表结构</option>
+                  <option value="keyword" selected>关键词</option>
+                  <option value="vector">向量</option>
+                  <option value="graph">图检索</option>
+                  <option value="hybrid">混合 · RRF</option>
+                </select>
+              </label>
+              <label class="switch-field" for="schema-expand">
+                <input id="schema-expand" type="checkbox" role="switch">
+                <span class="switch-track" aria-hidden="true"></span>
+                <span>定向扩展</span>
+              </label>
+              <label class="number-field" for="max-turns"><span>轮次上限</span><input id="max-turns" type="number" min="1" max="12" step="1" value="4"></label>
+              <label class="number-field" for="max-tools"><span>工具上限</span><input id="max-tools" type="number" min="0" step="1" placeholder="默认" title="所有工具合计的尝试次数，失败也计数；0 禁止工具调用"></label>
+              <label class="number-field" for="max-sql"><span>SQL 上限</span><input id="max-sql" type="number" min="0" step="1" placeholder="默认" title="SQL 尝试次数，失败也计数；0 禁止 SQL 调用"></label>
+            </div>
+          </details>
+        </form>
+      </section>
       <footer class="workspace-footer"><span>TransitMind</span><span id="footer-status">本地会话</span></footer>
     </main>
   </div>

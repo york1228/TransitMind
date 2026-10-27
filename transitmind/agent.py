@@ -1,7 +1,7 @@
 """Run the model/tool feedback loop without an Agent framework."""
 
 import json
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from time import perf_counter
 
 from .models import AgentRun, Message, Model, ModelCallError, StopReason, ToolCall, TraceEvent
@@ -42,6 +42,7 @@ class Agent:
     def run(
         self, question: str, *, history: Sequence[Message] = (),
         context_messages: Sequence[Message] = (),
+        on_event: Callable[[TraceEvent], None] | None = None,
     ) -> AgentRun:
         if not isinstance(question, str) or not question.strip():
             raise ValueError("A nonempty question is required.")
@@ -63,6 +64,13 @@ class Agent:
         # 只保存本次运行中允许修正的 SQL 失败；不写入会话或跨提问共享。
         failed_sql_calls: dict[str, dict[str, object]] = {}
 
+        def emit(kind: str, turn: int, details: dict[str, object]) -> None:
+            # 同一条事件先留在 trace，再通知调用方；CLI 不传回调时沿用原行为。
+            event = TraceEvent(kind, turn, details)
+            events.append(event)
+            if on_event is not None:
+                on_event(event)
+
         def finish(
             reason: StopReason, turn: int, final_answer: str | None = None,
             blocked_call: ToolCall | None = None,
@@ -82,7 +90,7 @@ class Agent:
             if failure is not None:
                 # 这个请求已经执行且失败，与预算检查时尚未执行的 blocked_call 区分。
                 details["failure"] = failure
-            events.append(TraceEvent("run_stopped", turn, details))
+            emit("run_stopped", turn, details)
             return AgentRun(tuple(messages), tuple(events), final_answer, reason, error=error)
 
         # 在模型请求、工具执行前后计时，把耗时写进对应事件
@@ -91,17 +99,17 @@ class Agent:
 #             model_duration_ms    → 模型请求累计耗时
 #             tool_duration_ms     → 工具执行累计耗时
 #             token_usage          → 输入、输出、合计 Token
-            events.append(TraceEvent("model_request", turn, {"message_count": len(messages)}))
+            emit("model_request", turn, {"message_count": len(messages)})
             # 开始前记一次时间，结束后再取时间，两者相减并转成毫秒。工具执行也是相同做法。
             model_started = perf_counter()
             try:
                 response = self.model.complete(tuple(messages), definitions)
             except ModelCallError as error:
                 # 适配器已清理诊断；保留已有 SQL、工具结果和本次失败耗时，不接受残缺回答。
-                events.append(TraceEvent("model_error", turn, {
+                emit("model_error", turn, {
                     "error": str(error), "usage": error.usage,
                     "duration_ms": round((perf_counter() - model_started) * 1000, 3),
-                }))
+                })
                 return finish("error", turn, error=str(error))
             model_duration_ms = round((perf_counter() - model_started) * 1000, 3)
 
@@ -116,12 +124,10 @@ class Agent:
             seen_call_ids.update(call_ids)
 
             messages.append(response)
-            events.append(
-                TraceEvent("model_response", turn, {
-                    "tool_call_count": len(response.tool_calls),
-                    "duration_ms": model_duration_ms, "usage": response.usage,
-                })
-            )
+            emit("model_response", turn, {
+                "tool_call_count": len(response.tool_calls),
+                "duration_ms": model_duration_ms, "usage": response.usage,
+            })
 
             if not response.tool_calls:
                 if not response.content.strip():
@@ -146,12 +152,9 @@ class Agent:
                         "repeated_failed_sql", turn, blocked_call=call,
                         failure=failed_sql_calls[sql_key],
                     )
-                events.append(
-                    TraceEvent(
-                        "tool_request", turn,
-                        {"call_id": call.id, "name": call.name, "arguments": call.arguments},
-                    )
-                )
+                emit("tool_request", turn, {
+                    "call_id": call.id, "name": call.name, "arguments": call.arguments,
+                })
                 # 进入注册表就算一次尝试，参数错误、SQL 拒绝和执行失败均不退回额度。
                 tool_call_count += 1
                 if call.name == "run_sql":
@@ -176,18 +179,13 @@ class Agent:
                     Message("tool", json.dumps(model_result, ensure_ascii=False), tool_call_id=call.id)
                 )
                 # 结构化数据放进事件，保存 JSON 或接页面时用 call_id 对应工具请求。
-                events.append(
-                    TraceEvent(
-                        "tool_result", turn,
-                        {
-                            "call_id": call.id, "name": call.name,
-                            "success": result.success, "error_code": result.error_code,
-                            "duration_ms": duration_ms,
-                            "metadata": result.metadata,
-                            **({"recovery": recovery} if recovery is not None else {}),
-                        },
-                    )
-                )
+                emit("tool_result", turn, {
+                    "call_id": call.id, "name": call.name,
+                    "success": result.success, "error_code": result.error_code,
+                    "duration_ms": duration_ms,
+                    "metadata": result.metadata,
+                    **({"recovery": recovery} if recovery is not None else {}),
+                })
                 if recovery is not None:
                     failure: dict[str, object] = {
                         "call_id": call.id, "name": call.name, "error_code": result.error_code,
