@@ -3,7 +3,7 @@
 const $ = (id) => document.getElementById(id);
 const state = {
   raw: null, record: null, view: "query", step: 0, historyId: null, busy: false, conversationId: null,
-  followLatest: true, progressOpen: false, openProcessSteps: new Set(), processRounds: new Map(),
+  followLatest: true, progressOpen: false, openProcessSteps: new Set(), processRounds: new Map(), modelText: new Map(),
 };
 const viewport = $("workspace-body");
 const historyState = { records: [], expanded: new Set() };
@@ -760,6 +760,7 @@ function clearQuery() {
   state.followLatest = true; state.progressOpen = false;
   state.openProcessSteps.clear();
   state.processRounds.clear();
+  state.modelText.clear();
   $("question").value = ""; $("run-overview").hidden = true; $("download-record").disabled = true;
   $("empty-state").querySelector("h2").textContent = "等待查询";
   $("footer-status").textContent = state.conversationId ? "会话已就绪" : "独立查询";
@@ -899,6 +900,28 @@ function renderSchema(call, target) {
   }
 }
 
+function streamTextBlock(turn) {
+  const block = el("div", "model-stream");
+  block.dataset.streamTurn = turn;
+  const text = state.modelText.get(turn) || "";
+  block.hidden = !text;
+  block.append(el("div", "stream-text", text));
+  return block;
+}
+
+function updateStreamText() {
+  // 文字分片只更新已挂载的文字节点，不重绘整个 trace、表格和调试面板。
+  for (const block of document.querySelectorAll("[data-stream-turn]")) {
+    const text = state.modelText.get(Number(block.dataset.streamTurn)) || "";
+    block.hidden = !text;
+    block.firstElementChild.textContent = text;
+    if (block.parentElement.classList.contains("model-preview")) block.parentElement.hidden = !text;
+  }
+  for (const placeholder of document.querySelectorAll("[data-stream-wait]")) {
+    placeholder.hidden = state.modelText.has(Number(placeholder.dataset.streamWait));
+  }
+}
+
 // 把已有数据显示到页面上。
 function renderQuery() {
   const panel = $("query-panel"); panel.replaceChildren();
@@ -909,6 +932,18 @@ function renderQuery() {
     title.append(iconButton("copy", "复制回答", () => copy(record.raw.final_answer)));
     const answer = el("div", "markdown"); renderMarkdown(record.raw.final_answer, answer);
     section.append(title, answer); panel.append(section);
+  } else {
+    const latest = record.steps.filter((step) => step.kind === "model").at(-1);
+    // 工具调用结束前不能把可见文字认作最终回答；完成后由 result 的正文替换。
+    if (latest && !(latest.toolCount > 0)) {
+      const section = el("section", "answer-section model-preview");
+      section.hidden = !state.modelText.has(latest.turn);
+      const title = heading("模型文字预览", "message-square");
+      const failed = latest.error || record.raw.error;
+      title.append(el("span", `status-badge ${failed ? "error" : "neutral"}`, failed ? "未接受" : latest.pending ? "生成中" : "待保存"));
+      section.append(title, streamTextBlock(latest.turn));
+      panel.append(section);
+    }
   }
   if (!record.independent && (record.status === "running" || record.steps.length)) {
     const progress = el("details", "live-progress");
@@ -1070,8 +1105,14 @@ function renderStepContent(step, target) {
     const output = detailSection(toolCalls.length ? "模型返回的工具请求" : "模型返回");
     if (step.error) output.append(el("div", "inline-error", step.error));
     if (step.output?.content) { const text = el("div", "markdown"); renderMarkdown(step.output.content, text); output.append(text); }
+    else output.append(streamTextBlock(step.turn));
     for (const call of toolCalls) output.append(el("pre", "json-content", pretty({ call_id: call.id, name: call.name, arguments: call.arguments })));
-    if (!step.output?.content && !toolCalls.length) output.append(el("p", "subtle", step.pending ? "等待模型返回…" : state.record.status === "running" ? "完整回复将在运行结束后载入。" : "本轮没有已记录的可接受回复。"));
+    if (!step.output?.content && !toolCalls.length) {
+      const placeholder = el("p", "subtle", step.pending ? "等待模型返回…" : state.record.status === "running" ? "完整回复将在运行结束后载入。" : "本轮没有已记录的可接受回复。");
+      placeholder.dataset.streamWait = step.turn;
+      placeholder.hidden = state.modelText.has(step.turn);
+      output.append(placeholder);
+    }
     const input = el("details", "message-item model-input");
     input.append(el("summary", "", `本轮发送给模型的输入 · ${step.messageCount} 条消息`));
     if (state.record.status === "running") input.append(el("p", "subtle", "完整消息将在运行结束后载入。"));
@@ -1228,7 +1269,7 @@ function showRecord(raw, recordId = null) {
   const follow = state.busy && state.followLatest && ["query", "debug"].includes(state.view);
   const scrollTop = viewport.scrollTop;
   const record = normalize(raw);
-  if (!state.busy) { state.openProcessSteps.clear(); state.processRounds.clear(); state.progressOpen = false; }
+  if (!state.busy) { state.openProcessSteps.clear(); state.processRounds.clear(); state.modelText.clear(); state.progressOpen = false; }
   state.raw = raw; state.record = record; state.historyId = recordId;
   state.step = record.status === "running" ? Math.max(0, record.steps.length - 1) : 0;
   $("empty-state").hidden = true;
@@ -1375,6 +1416,7 @@ $("query-form").addEventListener("submit", async (event) => {
   state.followLatest = true; state.progressOpen = false;
   state.openProcessSteps.clear();
   state.processRounds.clear();
+  state.modelText.clear();
   setBusy(true);
   if (!["query", "debug"].includes(state.view)) setView("query");
   showRecord(live);
@@ -1406,6 +1448,13 @@ $("query-form").addEventListener("submit", async (event) => {
         const kind = eventLine.slice("event: ".length);
         const packet = JSON.parse(dataLine.slice("data: ".length));
         if (kind === "started") $("footer-status").textContent = "已连接 · 正在准备上下文";
+        if (kind === "text_delta") {
+          const turn = packet.model_turn;
+          state.modelText.set(turn, (state.modelText.get(turn) || "") + packet.details.text);
+          updateStreamText();
+          $("footer-status").textContent = "模型正在输出文字";
+          if (state.followLatest && ["query", "debug"].includes(state.view)) requestAnimationFrame(() => { viewport.scrollTop = viewport.scrollHeight; });
+        }
         if (kind === "trace") {
           live.events.push(packet);
           showRecord(live);

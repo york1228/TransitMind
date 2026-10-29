@@ -21,10 +21,13 @@ from .sql_policy import (
 )
 
 
-# 本课开放七张表的单表读取，以及一条已声明关系上的两表 JOIN。
+# 开放七张表的单表读取，以及沿已声明关系逐段连接的有界多表 JOIN；数量由策略控制。
 # 停站记录通过 trip_id 连到班次，通过 stop_id 连到站点；日历表仍单独查询。
 # 用解析后的节点限定能力，不靠危险关键词黑名单；不是完整生产 SQL 安全策略。
-_FUNCTION_NODES = {"COUNT": exp.Count, "LOWER": exp.Lower, "UPPER": exp.Upper}
+_FUNCTION_NODES = {
+    "COUNT": exp.Count, "LOWER": exp.Lower, "UPPER": exp.Upper,
+    "MIN": exp.Min, "MAX": exp.Max,
+}
 ALLOWED_NODES = (
     exp.Select, exp.From, exp.Table, exp.TableAlias, exp.Identifier,
     exp.Column, exp.Star, exp.Alias, exp.Literal, exp.Null, exp.Boolean,
@@ -58,29 +61,42 @@ def prepare_sql(sql: str) -> str:
                 raise ValueError(f"This lesson does not support {node.key}. Use a simple SELECT on the configured GTFS tables.")
 
         tables = list(statement.find_all(exp.Table))
-        if not 1 <= len(tables) <= MAX_TABLES or any(
+        # 数量超限与访问未授权对象分开反馈，避免模型沿错误方向修正 SQL。
+        if not 1 <= len(tables) <= MAX_TABLES:
+            raise ValueError(f"Use between 1 and {MAX_TABLES} tables.")
+        if any(
             table.name not in ALLOWED_TABLES or table.db not in {"", SQL_SCHEMA} or table.catalog for table in tables
         ):
             raise ValueError(f"Only the configured {SQL_SCHEMA} GTFS tables are enabled in this lesson.")
         joins = statement.args.get("joins") or []
-        if len(tables) == 2:
-            aliases = {table.alias_or_name: table.name for table in tables}
-            table_pair = frozenset(table.name for table in tables)
-            if len(aliases) != 2 or table_pair not in JOIN_KEYS or len(joins) != MAX_JOINS:
-                pairs = ", ".join(f"{left}/{right}" for left, right in ALLOWED_JOINS)
-                raise ValueError(f"Use one declared {pairs} join; no self joins.")
-            join = joins[0]
-            on = join.args.get("on")
-            if (join.side not in ALLOWED_JOIN_SIDES or join.kind not in ALLOWED_JOIN_KINDS
-                    or not isinstance(on, exp.EQ)):
-                raise ValueError(f"Use {join_type_description()} JOIN with the declared foreign-key columns.")
-            keys = (on.this, on.expression)
-            expected_key = JOIN_KEYS[table_pair]
-            if (any(not isinstance(key, exp.Column) or key.name != expected_key for key in keys)
-                    or {aliases.get(key.table) for key in keys} != table_pair):
-                raise ValueError(f"JOIN must match the two qualified {expected_key} columns; filters belong in WHERE.")
-        elif joins:
-            raise ValueError("A join must use one declared relationship; standalone GTFS queries are allowed.")
+        if len(joins) != len(tables) - 1 or len(joins) > MAX_JOINS:
+            raise ValueError(f"Use at most {MAX_TABLES} tables, with one declared JOIN per added table.")
+        aliases = {table.alias_or_name: table.name for table in tables}
+        if len(aliases) != len(tables) or len(set(aliases.values())) != len(tables):
+            raise ValueError("Use unique table aliases; self joins are not allowed.")
+        if joins:
+            # 从 FROM 表出发，逐次只把新表接到已有表；不允许引用后面才加入的别名。
+            joined_aliases = {statement.args["from_"].this.alias_or_name}
+            for join in joins:
+                on = join.args.get("on")
+                if (not isinstance(join.this, exp.Table)
+                        or join.side not in ALLOWED_JOIN_SIDES or join.kind not in ALLOWED_JOIN_KINDS
+                        or not isinstance(on, exp.EQ)):
+                    raise ValueError(f"Use {join_type_description()} JOIN with the declared foreign-key columns.")
+                keys = (on.this, on.expression)
+                if any(not isinstance(key, exp.Column) for key in keys):
+                    raise ValueError("JOIN ON must compare two qualified relationship columns; filters belong in WHERE.")
+                new_alias = join.this.alias_or_name
+                key_aliases = {key.table for key in keys}
+                if (len(key_aliases) != 2 or new_alias not in key_aliases
+                        or not (key_aliases - {new_alias}) <= joined_aliases):
+                    raise ValueError("Each JOIN ON must connect the added table to an earlier table using qualified columns.")
+                # 外键或检索结果只提供线索；真正放行仍以人工声明的表对和连接字段为准。
+                table_pair = frozenset(aliases[alias] for alias in key_aliases)
+                expected_key = JOIN_KEYS.get(table_pair)
+                if expected_key is None or any(key.name != expected_key for key in keys):
+                    raise ValueError("JOIN must match a declared relationship and its exact columns; filters belong in WHERE.")
+                joined_aliases.add(new_alias)
         # 固定 public，避免同名表或临时表改变查询目标。
         for table in tables:
             table.set("db", exp.to_identifier(SQL_SCHEMA))

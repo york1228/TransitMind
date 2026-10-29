@@ -58,16 +58,19 @@ class Agent:
         events: list[TraceEvent] = []
         seen_call_ids: set[str] = set()
         definitions = self.tools.definitions()
+        complete_stream = getattr(self.model, "complete_stream", None)
         # 在 run 内计数，每次提问从零开始；同一轮返回多个工具时逐个检查。
         tool_call_count = 0
         sql_attempt_count = 0
         # 只保存本次运行中允许修正的 SQL 失败；不写入会话或跨提问共享。
         failed_sql_calls: dict[str, dict[str, object]] = {}
 
-        def emit(kind: str, turn: int, details: dict[str, object]) -> None:
-            # 同一条事件先留在 trace，再通知调用方；CLI 不传回调时沿用原行为。
+        def emit(kind: str, turn: int, details: dict[str, object], *, transient: bool = False) -> None:
+            # 普通事件先留在 trace，再通知调用方；CLI 不传回调时沿用原行为。
             event = TraceEvent(kind, turn, details)
-            events.append(event)
+            # 文字增量只实时转发，避免每个分片都写入 trace；完整回复仍在 messages 中。
+            if not transient:
+                events.append(event)
             if on_event is not None:
                 on_event(event)
 
@@ -103,7 +106,14 @@ class Agent:
             # 开始前记一次时间，结束后再取时间，两者相减并转成毫秒。工具执行也是相同做法。
             model_started = perf_counter()
             try:
-                response = self.model.complete(tuple(messages), definitions)
+                if on_event is not None and complete_stream is not None:
+                    response = complete_stream(
+                        tuple(messages), definitions,
+                        on_text=lambda text: emit("model_text_delta", turn, {"text": text}, transient=True),
+                    )
+                else:
+                    # 脚本模型或无事件订阅的 CLI 沿用普通调用，不伪造流式分片。
+                    response = self.model.complete(tuple(messages), definitions)
             except ModelCallError as error:
                 # 适配器已清理诊断；保留已有 SQL、工具结果和本次失败耗时，不接受残缺回答。
                 emit("model_error", turn, {

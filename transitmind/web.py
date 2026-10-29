@@ -261,7 +261,9 @@ def stream_query(request: RunRequest) -> StreamingResponse:
         with ThreadPoolExecutor(max_workers=1, thread_name_prefix="transitmind-query") as worker:
             future = worker.submit(
                 execute_web_query, request,
-                on_event=lambda event: packets.put(("trace", asdict(event))),
+                on_event=lambda event: packets.put((
+                    "text_delta" if event.kind == "model_text_delta" else "trace", asdict(event),
+                )),
             )
             # Future 保存线程的返回值或异常，保证执行结束后生成器能够离开等待。
             future.add_done_callback(lambda completed: packets.put(("result", completed)))

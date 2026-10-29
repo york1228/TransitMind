@@ -2,13 +2,15 @@
 # 客户端创建
 import json
 import os
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
+from httpx import TimeoutException, TransportError
 from openai import APIConnectionError, APIError, APIStatusError, APITimeoutError, AuthenticationError, OpenAI
+from openai.types.chat import ChatCompletionMessage
 
 # 保留旧模块的 ModelCallError 导出；核心循环直接依赖公共类型，不依赖 SDK。
 from .models import Message, ModelCallError, ToolCall, ToolDefinition
@@ -47,6 +49,15 @@ def tool_to_api(tool: ToolDefinition) -> dict[str, Any]:
     }
 
 
+def token_usage(api_usage: Any) -> dict[str, int] | None:
+    # 普通回复和流式末包共用同一份 API 用量转换；不累计每个分片。
+    return None if api_usage is None else {
+        "prompt_tokens": api_usage.prompt_tokens,
+        "completion_tokens": api_usage.completion_tokens,
+        "total_tokens": api_usage.total_tokens,
+    }
+
+
 class DeepSeekModel:
     def __init__(self, client: OpenAI, model: str = "deepseek-flash") -> None:
         self.client = client
@@ -55,61 +66,107 @@ class DeepSeekModel:
     def complete(
         self, messages: Sequence[Message], tools: Sequence[ToolDefinition], *,
         max_tokens: int = 1536, json_output: bool = False,
+        on_text: Callable[[str], None] | None = None,
+        # 评测裁判使用低温度减少判定波动；普通 Agent 调用不传，保持原请求。
+        temperature: float | None = None,
+        # 怎样接收文字分片；怎样把工具参数拼完整；何时才接受整轮回复
     ) -> Message:
         request: dict[str, Any] = {
             "model": self.model,
             "messages": [message_to_api(message) for message in messages],
             # 工具结果可能包含多行数据，给最终的中文总结留出空间。
             "max_tokens": max_tokens,
-            "stream": False,
+            "stream": on_text is not None,
             # DeepSeek defaults to thinking mode, which needs extra history fields.
             "extra_body": {"thinking": {"type": "disabled"}},
         }
+        if temperature is not None:
+            request["temperature"] = temperature
         # 元数据起草只需要一个 JSON 对象；普通 Agent 调用仍沿用原来的默认设置。
         if json_output:
             request["response_format"] = {"type": "json_object"}
         if tools:
             request["tools"] = [tool_to_api(tool) for tool in tools]
             request["tool_choice"] = "auto"
+        if on_text is not None:
+            request["stream_options"] = {"include_usage": True}
 
+        usage = None
         try:
-            response = self.client.chat.completions.create(**request)
+            if on_text is None:
+                response = self.client.chat.completions.create(**request)
+                usage = token_usage(getattr(response, "usage", None))
+                if not response.choices:
+                    raise ModelCallError("DeepSeek returned no response choices.", usage=usage)
+                choice = response.choices[0]
+                finish_reason = choice.finish_reason
+                reply = choice.message
+            else:
+                parts: list[str] = []
+                builders: dict[int, dict[str, Any]] = {}
+                finish_reason = None
+                # 流的连接在正常结束和异常时都关闭；客户端仍由应用层释放。
+                with self.client.chat.completions.create(**request) as stream:
+                    for chunk in stream:
+                        if chunk.usage is not None:
+                            usage = token_usage(chunk.usage)
+                        if not chunk.choices:
+                            continue
+                        choice = chunk.choices[0]
+                        delta = choice.delta
+                        if delta.role is not None and delta.role != "assistant":
+                            raise ModelCallError("DeepSeek must return an assistant message.", usage=usage)
+                        if getattr(delta, "reasoning_content", None):
+                            raise ModelCallError("Lesson 2 requires non-thinking mode; the API returned thinking content.", usage=usage)
+                        if delta.content:
+                            parts.append(delta.content)
+                            on_text(delta.content)
+                        # 同一调用的 JSON 参数可能分在多个包，按 index 拼完整后才解析。
+                        for call in delta.tool_calls or ():
+                            if call.type is not None and call.type != "function":
+                                raise ModelCallError("Only function tool calls are supported in this lesson.", usage=usage)
+                            builder = builders.setdefault(call.index, {
+                                "id": "", "type": "function", "function": {"name": "", "arguments": ""},
+                            })
+                            if call.id:
+                                builder["id"] = call.id
+                            if call.function is not None:
+                                builder["function"]["name"] += call.function.name or ""
+                                builder["function"]["arguments"] += call.function.arguments or ""
+                        if choice.finish_reason is not None:
+                            finish_reason = choice.finish_reason
+                reply = ChatCompletionMessage(
+                    role="assistant", content="".join(parts),
+                    tool_calls=[builders[index] for index in sorted(builders)] or None,
+                )
         except AuthenticationError:
-            raise ModelCallError("DeepSeek authentication failed. Check DEEPSEEK_API_KEY locally.") from None
-        except APITimeoutError:
-            raise ModelCallError("DeepSeek request timed out. Check the network before retrying.") from None
-        except APIConnectionError:
-            raise ModelCallError("Cannot connect to DeepSeek. Check the network and base URL.") from None
+            raise ModelCallError("DeepSeek authentication failed. Check DEEPSEEK_API_KEY locally.", usage=usage) from None
+        # 流中途的超时或断线可能由 HTTPX 直接抛出，沿用原诊断，不自动重试。
+        except (APITimeoutError, TimeoutException):
+            raise ModelCallError("DeepSeek request timed out. Check the network before retrying.", usage=usage) from None
+        except (APIConnectionError, TransportError):
+            raise ModelCallError("Cannot connect to DeepSeek. Check the network and base URL.", usage=usage) from None
         except APIStatusError as error:
             raise ModelCallError(
-                f"DeepSeek returned HTTP {error.status_code}. Check the model, account balance, and API settings."
+                f"DeepSeek returned HTTP {error.status_code}. Check the model, account balance, and API settings.",
+                usage=usage,
             ) from None
         except APIError:
-            raise ModelCallError("The DeepSeek SDK could not complete the request.") from None
+            raise ModelCallError("The DeepSeek SDK could not complete the request.", usage=usage) from None
 
         # 先提取 API 实际用量：达到输出上限等不可接受的回复也可能已经消耗 Token。
         # 用 API token 的实际统计，不按字符估算；未返回 usage 时保留为 None。
-        api_usage = getattr(response, "usage", None)
-        usage = None if api_usage is None else {
-            "prompt_tokens": api_usage.prompt_tokens,
-            "completion_tokens": api_usage.completion_tokens,
-            "total_tokens": api_usage.total_tokens,
-        }
-        if not response.choices:
-            raise ModelCallError("DeepSeek returned no response choices.", usage=usage)
-        choice = response.choices[0]
-        if choice.finish_reason not in {"stop", "tool_calls"}:
-            if choice.finish_reason == "length":
+        if finish_reason not in {"stop", "tool_calls"}:
+            if finish_reason == "length":
                 raise ModelCallError(
                     "DeepSeek response hit the output token limit. "
                     "Use a narrower query or let the Agent summarize truncated results.",
                     usage=usage,
                 )
             raise ModelCallError(
-                f"DeepSeek stopped with finish_reason={choice.finish_reason!r}; "
+                f"DeepSeek stopped with finish_reason={finish_reason!r}; "
                 "no final answer was accepted.", usage=usage,
             )
-        reply = choice.message
         if reply.role != "assistant":
             raise ModelCallError("DeepSeek must return an assistant message.", usage=usage)
         if getattr(reply, "reasoning_content", None):
@@ -128,6 +185,13 @@ class DeepSeekModel:
             calls.append(ToolCall(call.id, call.function.name, arguments))
 
         return Message("assistant", reply.content or "", tool_calls=tuple(calls), usage=usage)
+
+    def complete_stream(
+        self, messages: Sequence[Message], tools: Sequence[ToolDefinition], *,
+        on_text: Callable[[str], None],
+    ) -> Message:
+        # 可选的流式入口复用 complete 的请求和校验；原 CLI、AI 起草不改变返回方式。
+        return self.complete(messages, tools, on_text=on_text)
 
 
 def build_deepseek_model() -> DeepSeekModel:
